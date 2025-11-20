@@ -33,6 +33,53 @@
   overlay.style.gap = '10px';
   overlay.style.fontFamily = 'Arial, sans-serif';
 
+  // --- Controls (sticky settings) ---
+  const LS_KEYS = {
+    includeResponses: 'txt2mp3_useResponses',
+    outputSSML: 'txt2mp3_outputSSML',
+  };
+
+  const controlsRow = document.createElement('div');
+  controlsRow.style.display = 'flex';
+  controlsRow.style.gap = '12px';
+  controlsRow.style.alignItems = 'center';
+
+  function makeCheckbox(labelText, key, defaultValue) {
+    const wrapper = document.createElement('label');
+    wrapper.style.display = 'inline-flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '6px';
+    wrapper.style.color = '#000'; // ensure label is visible
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.style.marginRight = '6px';
+    // give the input a predictable name/id so it's accessible in the DOM
+    cb.name = `txt2mp3_${key}`;
+    cb.id = `txt2mp3_${key}`;
+    const stored = localStorage.getItem(key);
+    // accept both '1'/'0' and 'true'/'false' for compatibility
+    cb.checked = stored === null ? !!defaultValue : (stored === '1' || stored === 'true');
+    cb.onchange = () => {
+      localStorage.setItem(key, cb.checked ? '1' : '0');
+      regenerate(); // update output when user toggles
+    };
+    const span = document.createElement('span');
+    span.textContent = labelText;
+    span.style.userSelect = 'none';
+    span.style.color = '#000';
+    span.style.fontWeight = '600';
+    wrapper.appendChild(cb);
+    wrapper.appendChild(span);
+    return { wrapper, cb };
+  }
+
+  // first checkbox label "Requests" default ON, second "SSML" default OFF
+  const includeRes = makeCheckbox('Requests', LS_KEYS.includeResponses, true);
+  const outputSSML = makeCheckbox('SSML', LS_KEYS.outputSSML, false);
+
+  controlsRow.appendChild(includeRes.wrapper);
+  controlsRow.appendChild(outputSSML.wrapper);
+
   // --- Create textarea ---
   const textarea = document.createElement('textarea');
   textarea.style.flex = '1';
@@ -75,34 +122,34 @@
   // Save as file button
   const saveBtn = makeBtn('Save as file');
   saveBtn.onclick = () => {
+    // slugify first three words of document title as default name
+    function slugifyTitle(title) {
+      if (!title) return 'extracted-text';
+      // remove punctuation, keep letters/numbers/space/hyphen, lowercase
+      const cleaned = String(title).toLowerCase().trim().replace(/[^\w\s-]/g, '');
+      const parts = cleaned.split(/\s+/).filter(Boolean).slice(0, 3);
+      return parts.length ? parts.join('-') : 'extracted-text';
+    }
+
+    const titleSlug = slugifyTitle(document.title);
+    const defaultName = `${titleSlug}.txt`;
+    const last = localStorage.getItem('txt2mp3_lastFilename') || defaultName;
+    let filename = prompt('Save as (enter filename):', last);
+    if (!filename) return; // cancelled
+    filename = filename.trim();
+    if (filename === '') return;
+    if (!filename.includes('.')) filename += '.txt';
+    localStorage.setItem('txt2mp3_lastFilename', filename);
+
     const blob = new Blob([textarea.value], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'extracted_text.txt';
+    a.download = filename;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
-  };
-
-  let fill = () => {
-    textarea.value = textarea.dataset.isRes ?
-      (textarea.dataset.isSSML ? textarea.dataset.ssmlResText : textarea.dataset.plainResText) :
-      (textarea.dataset.isSSML ? textarea.dataset.ssmlReqText : textarea.dataset.plainReqText);
-  }; 
-
-  const togBtn = makeBtn('Toggle SSML');
-  togBtn.onclick = () => {
-    //debugger;
-    textarea.dataset.isSSML = textarea.dataset.isSSML ? "" : 1;
-    fill();
-  };
-
-  const sqBtn = makeBtn('Show Requests');
-  sqBtn.onclick = () => {
-    //debugger;
-    textarea.dataset.isRes = textarea.dataset.isRes ? "" : 1;
-    fill();
-    sqBtn.textContent = textarea.dataset.isRes ? 'Show Requests' : 'Show Responses';
   };
 
   // Close button
@@ -113,50 +160,44 @@
 
   btnBox.appendChild(copyBtn);
   btnBox.appendChild(saveBtn);
-  btnBox.appendChild(togBtn);
-  btnBox.appendChild(sqBtn);
   btnBox.appendChild(closeBtn);
 
+  overlay.appendChild(controlsRow);
   overlay.appendChild(textarea);
   overlay.appendChild(btnBox);
   document.body.appendChild(overlay);
 
   // --- Extract and transform text ---
-  
+
   /**
    * NEW processParagraph function.
    * Recursively walks the DOM nodes of a paragraph element.
    * Encodes all text content, and replaces <strong> tags
-   * with <prosody> tags (while also encoding their content).
+   * with <prosody> tags when SSML output is requested.
    */
-  function processParagraph(pEl, encode) {
-    // Inner recursive function to walk the DOM
+  function processParagraph(pEl, useSSML) {
     function getNodeText(node) {
       let text = '';
       if (node.nodeType === Node.TEXT_NODE) {
-        // It's a text node, encode its content
-        text += encode ? htmlEncode(node.textContent) : node.textContent;
+        text += useSSML ? htmlEncode(node.textContent) : node.textContent;
       } else if (node.nodeType === Node.ELEMENT_NODE) {
-        // It's an element
         if (node.tagName === 'STRONG') {
-          // Special case: <strong>
-          // Get its text, encode it, and wrap in <prosody>
-          const strongText = text += encode ? htmlEncode(node.textContent) : node.textContent;
-          text += encode ? `<prosody volume="x-loud" rate="80%">${strongText}</prosody>` : strongText;
+          const strongText = node.textContent;
+          const encodedStrongText = useSSML ? htmlEncode(strongText) : strongText;
+          if (useSSML) {
+            text += `<prosody volume="x-loud" rate="80%">${encodedStrongText}</prosody>`;
+          } else {
+            text += encodedStrongText;
+          }
         } else {
-          // It's any other element (like <em>, <a>, etc.)
-          // Recurse into its children to get their text,
-          // matching the behavior of the original .textContent
           node.childNodes.forEach(child => {
             text += getNodeText(child);
           });
         }
       }
-      // Ignore other node types (comments, etc.)
       return text;
     }
 
-    // Start the recursion on the paragraph's children
     let output = '';
     pEl.childNodes.forEach(child => {
       output += getNodeText(child);
@@ -164,37 +205,37 @@
     return output;
   }
 
-  // --- Main extraction ---
-  var plainText = '', ssmlText = '<speak>\n';
-  document.querySelectorAll('.message-bubble:not(.rounded-br-lg)').forEach(el => {
-    el.querySelectorAll('p,h1,h2,h3,h4,h5').forEach(p => {
-      let header = p.tagName != 'p';
-      ssmlText += processParagraph(p, true) + (header ? ' <break strength="strong"/>\n' : ' <break/>\n');
-      plainText += processParagraph(p, false) + '\n';
+  // --- Main extraction (regeneratable) ---
+  function regenerate() {
+    const includeResponsesChecked = includeRes.cb.checked;
+    const useSSML = outputSSML.cb.checked;
+
+    const selector = includeResponsesChecked
+      ? '.message-bubble:not(.rounded-br-lg)'
+      : '.message-bubble';
+
+    textarea.value = '';
+    if (useSSML) textarea.value += '<speak>\n';
+
+    document.querySelectorAll(selector).forEach(el => {
+      el.querySelectorAll('p, h1, h2, h3, h4, h5, li').forEach(p => {
+        const processed = processParagraph(p, useSSML);
+        if (useSSML) {
+          textarea.value += processed + ' <break/>\n\n';
+        } else {
+          textarea.value += processed + '\n\n';
+        }
+      });
+      if (useSSML) {
+        textarea.value += '\n<break strength="x-strong"/>\n\n';
+      } else {
+        textarea.value += '\n\n';
+      }
     });
-    ssmlText += '\n<break strength="x-strong"/>\n\n';
-    plainText += '\n';
-  });
-  ssmlText += '</speak>';
 
-  textarea.dataset.plainResText = plainText;
-  textarea.dataset.ssmlResText = ssmlText;
-  plainText = ''; ssmlText = '<speak>\n';
+    if (useSSML) textarea.value += '</speak>';
+  }
 
-  document.querySelectorAll('.message-bubble.rounded-br-lg').forEach(el => {
-    el.querySelectorAll('p').forEach(p => {
-      ssmlText += processParagraph(p, true) + ' <break/>\n';
-      plainText += processParagraph(p, false) + '\n';
-    });
-    ssmlText += '\n<break strength="x-strong"/>\n\n';
-    plainText += '\n';
-  });
-  ssmlText += '</speak>';
-
-  textarea.dataset.plainReqText = plainText;
-  textarea.dataset.ssmlReqText = ssmlText;
-
-  textarea.dataset.isSSML = "";
-  textarea.dataset.isRes = 1;
-  fill();
+  // initial populate
+  regenerate();
 })();
